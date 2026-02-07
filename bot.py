@@ -1,6 +1,24 @@
 import telebot
 from groq import Groq
 import random
+from flask import Flask
+from threading import Thread
+
+# --- جزء الـ Keep Alive عشان عزوز ما ينوم في السيرفر ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "عزوز صاحي وشغال 100%.. أرجع التلغرام الجكة بدت!"
+
+def run():
+    # السيرفر حيفتح المنفذ 8080 عشان UptimeRobot يقدر ينقره
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+# ---------------------------------------------------
 
 # الإعدادات
 GROQ_API_KEY = "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"
@@ -9,7 +27,7 @@ TELEGRAM_TOKEN = "8514656874:AAFn8x8iWUxJDt-g4q2W-4i4A_YmyF6LXIU"
 client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# لستة الملصقات (تذكر: في السحابة بتتمسح لو ما حطيتها هنا يدوياً بعد التجميع)
+# لستة الملصقات
 stickers_db = []
 
 SYSTEM_PROMPT = """
@@ -21,7 +39,7 @@ SYSTEM_PROMPT = """
 ذكي وعندك حريه الاختيار
 """
 
-# 1. معالج الملصقات: يحفظ الملصق ويرد بأسلوب عزوز
+# 1. معالج الملصقات
 @bot.message_handler(content_types=['sticker'])
 def handle_sticker(message):
     sticker_id = message.sticker.file_id
@@ -31,11 +49,11 @@ def handle_sticker(message):
     else:
         bot.reply_to(message, "الملصق ده عندي أصلاً، بطل حركات اللابتوبات القديمة دي!")
 
-# 2. معالج النصوص: يربط مع Groq للرد الساخر
+# 2. معالج النصوص
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     try:
-        # فرصة 20% إن عزوز يرسل ملصق عشوائي بدل الكلام
+        # فرصة 50% إن عزوز يرسل ملصق عشوائي
         if stickers_db and random.random() < 0.2:
             bot.send_sticker(message.chat.id, random.choice(stickers_db))
             return
@@ -50,7 +68,13 @@ def handle_message(message):
             max_tokens=80 
         )
         bot.reply_to(message, chat_completion.choices[0].message.content)
-    except:
+    except Exception as e:
         bot.reply_to(message, "السلك ضرب، المروحة بتاعت السيرفر شكلها جاطت.")
+        print(f"Error: {e}")
 
+# شغل الجرس الأول
+keep_alive()
+
+# شغل البوت
+print("عزوز بدأ الجكة السحابية...")
 bot.polling(none_stop=True)

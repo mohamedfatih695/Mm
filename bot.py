@@ -20,8 +20,8 @@ def keep_alive():
     t.start()
 # ---------------------------------------------------
 
-# الإعدادات
-GROQ_API_KEY = "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"
+# الإعدادات بمفتاحك الجديد الشغال
+GROQ_API_KEY = "Gsk_3dM3vVuAHj2wXgwNGlipWGdyb3FYPPG737ckZthFJ7XhGH04vp5R"
 TELEGRAM_TOKEN = "8514656874:AAFn8x8iWUxJDt-g4q2W-4i4A_YmyF6LXIU"
 
 client = Groq(api_key=GROQ_API_KEY)
@@ -53,7 +53,7 @@ def handle_sticker(message):
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     try:
-        # فرصة 50% إن عزوز يرسل ملصق عشوائي
+        # فرصة 20% إن عزوز يرسل ملصق عشوائي لو اللستة فيها ملصقات
         if stickers_db and random.random() < 0.2:
             bot.send_sticker(message.chat.id, random.choice(stickers_db))
             return

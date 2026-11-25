@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>لعبة المدرب 3D — نموذج أولي</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#0b3d1e;
+    font-family:"Segoe UI", Tahoma, Arial, sans-serif; }
+  #scene { position:fixed; inset:0; }
+  canvas { display:block; }
+
+  /* ---------- HUD ---------- */
+  #hud { position:fixed; top:0; left:0; right:0; z-index:10;
+    display:flex; flex-direction:column; align-items:center; gap:8px;
+    padding:10px 8px; pointer-events:none; }
+  #scorebar { pointer-events:auto; display:flex; align-items:center; gap:10px;
+    background:rgba(0,0,0,.72); color:#fff; border-radius:14px;
+    padding:8px 16px; box-shadow:0 4px 18px rgba(0,0,0,.45);
+    border:1px solid rgba(255,255,255,.15); }
+  .team { font-size:20px; font-weight:700; white-space:nowrap; }
+  .team.home { color:#7db4ff; } .team.away { color:#ff9a8a; }
+  #score { font-size:26px; font-weight:800; letter-spacing:2px; min-width:86px; text-align:center; }
+  #clock { font-size:15px; font-weight:700; background:#14532d; border-radius:8px;
+    padding:3px 10px; min-width:58px; text-align:center; }
+  #controls { pointer-events:auto; display:flex; gap:6px; flex-wrap:wrap; justify-content:center; }
+  button { font-family:inherit; font-size:14px; font-weight:700; cursor:pointer;
+    border:1px solid rgba(255,255,255,.25); border-radius:10px;
+    background:rgba(0,0,0,.65); color:#fff; padding:7px 14px; }
+  button:hover { background:rgba(30,30,30,.85); }
+  button.active { background:#eab308; color:#111; border-color:#eab308; }
+  #banner { position:fixed; top:38%; left:0; right:0; z-index:11; text-align:center;
+    font-size:52px; font-weight:900; color:#fde047;
+    text-shadow:0 4px 22px rgba(0,0,0,.8); opacity:0; transition:opacity .25s; pointer-events:none; }
+  #hint { position:fixed; bottom:8px; left:0; right:0; z-index:10; text-align:center;
+    color:rgba(255,255,255,.75); font-size:12.5px; pointer-events:none;
+    text-shadow:0 1px 4px rgba(0,0,0,.8); }
+  #loading { position:fixed; inset:0; z-index:20; display:flex; align-items:center; justify-content:center;
+    background:#0b3d1e; color:#fff; font-size:20px; font-weight:700; }
+  /* Landscape-first: the game is designed for a wide screen.
+     In portrait, a rotate overlay covers the scene (the match keeps running behind it). */
+  #rotate { position:fixed; inset:0; z-index:30; display:none; align-items:center; justify-content:center;
+    flex-direction:column; gap:10px; background:rgba(4,32,16,.96); color:#fff; text-align:center;
+    font-size:20px; font-weight:700; padding:24px; }
+  #rotate .icon { font-size:52px; }
+  @media (orientation: portrait) { #rotate { display:flex; } }
+</style>
+</head>
+<body>
+
+<div id="loading">جارٍ تحميل الملعب ثلاثي الأبعاد…</div>
+<div id="rotate"><div class="icon">📱↻</div><div>اللعبة أفقية — أدِر هاتفك عشان الشاشة تبقى واسعة</div></div>
+<div id="scene"></div>
+
+<div id="hud">
+  <div id="scorebar">
+    <span class="team home">الهلال</span>
+    <span id="score">0 - 0</span>
+    <span class="team away">المريخ</span>
+    <span id="clock">0:00</span>
+  </div>
+  <div id="controls">
+    <button id="btnPlay">⏸ إيقاف مؤقت</button>
+    <button class="spd" data-s="1">×1</button>
+    <button class="spd active" data-s="2">×2</button>
+    <button class="spd" data-s="4">×4</button>
+    <button id="btnCam">📷 كاميرا خلف المرمى</button>
+    <button id="btnRestart">↺ مباراة جديدة</button>
+  </div>
+</div>
+
+<div id="banner"></div>
+<div id="hint">نموذج أولي 3D — مباراة محاكاة حية: مراوغة وتمرير وتسديد وأهداف</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* =====================================================================
+   Coach Game 3D — playable prototype (step 1 of the 3D rebuild)
+   A live, self-running match simulation on a 3D pitch:
+   dribbling, passing, shooting, goal detection, kickoff resets,
+   an accelerated 90-minute clock and a broadcast camera that
+   follows the ball. No build step — just open the file.
+   ===================================================================== */
+
+// ---------------- Pitch dimensions (metres, FIFA-ish) ----------------
+const PITCH_L = 105;            // x axis: goal to goal
+const PITCH_W = 68;             // z axis: touchline to touchline
+const GOAL_W  = 7.32;           // goal mouth width
+const GOAL_H  = 2.44;           // crossbar height
+const BALL_R  = 0.35;
+
+// ---------------- Match timing ----------------
+// 90 game-minutes pass in ~3.5 real minutes at speed x1.
+// The HUD speed buttons multiply this base rate.
+const GAME_MIN_PER_SEC = 90 / 210;
+
+// ---------------- Landscape lock (best effort, on first tap) ----------------
+// Mohamed's requirement: the game is landscape — a wide screen fits the pitch.
+// On the first user tap we try fullscreen + landscape orientation lock
+// (supported on Android browsers); the portrait overlay above is the fallback.
+window.addEventListener('pointerdown', function lockLandscape() {
+  window.removeEventListener('pointerdown', lockLandscape);
+  try {
+    const el = document.documentElement;
+    if (el.requestFullscreen) {
+      el.requestFullscreen()
+        .then(() => { if (screen.orientation && screen.orientation.lock) return screen.orientation.lock('landscape'); })
+        .catch(() => {});
+    }
+  } catch (e) { /* desktop / unsupported — the overlay still guides the user */ }
+}, { once: false });
+
+// ---------------- Renderer / scene / lights ----------------
+const container = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+container.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87b5d9);           // sky
+scene.fog = new THREE.Fog(0x87b5d9, 160, 320);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x2e7d32, 0.95));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(40, 70, 30);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -80; sun.shadow.camera.right = 80;
+sun.shadow.camera.top = 60;   sun.shadow.camera.bottom = -60;
+sun.shadow.camera.far = 220;
+scene.add(sun);
+
+// ---------------- Pitch surface with painted lines ----------------
+// Lines are drawn once onto a canvas texture: cheap and crisp.
+function makePitchTexture() {
+  const S = 14;                                   // px per metre
+  const c = document.createElement('canvas');
+  c.width = (PITCH_L + 12) * S; c.height = (PITCH_W + 12) * S;
+  const g = c.getContext('2d');
+  const ox = 6 * S, oy = 6 * S;                   // margin offset
+  const X = m => ox + m * S, Z = m => oy + m * S;
+
+  // Grass with mowing stripes
+  for (let i = 0; i < 14; i++) {
+    g.fillStyle = i % 2 ? '#2f9e44' : '#2b9340';
+    g.fillRect(X(i * PITCH_L / 14 - PITCH_L / 2), 0, (PITCH_L / 14) * S, c.height);
+  }
+  g.fillStyle = '#2f9e44'; g.fillRect(0, 0, c.width, c.height);
+  for (let i = 0; i < 14; i++) {
+    g.fillStyle = i % 2 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
+    g.fillRect(X(i * PITCH_L / 14 - PITCH_L / 2), 0, (PITCH_L / 14) * S, c.height);
+  }
+
+  // Line style
+  g.strokeStyle = '#ffffff'; g.fillStyle = '#ffffff'; g.lineWidth = 0.14 * S;
+  const line = (x1, z1, x2, z2) => { g.beginPath(); g.moveTo(X(x1), Z(z1)); g.lineTo(X(x2), Z(z2)); g.stroke(); };
+  const rect = (x, z, w, h) => g.strokeRect(X(x), Z(z), w * S, h * S);
+  const dot  = (x, z, r) => { g.beginPath(); g.arc(X(x), Z(z), r * S, 0, Math.PI * 2); g.fill(); };
+  const HL = PITCH_L / 2, HW = PITCH_W / 2;
+
+  rect(-HL, -HW, PITCH_L, PITCH_W);               // boundary
+  line(0, -HW, 0, HW);                            // halfway line
+  g.beginPath(); g.arc(X(0), Z(0), 9.15 * S, 0, Math.PI * 2); g.stroke();
+  dot(0, 0, 0.22);                                // centre spot
+  for (const s of [-1, 1]) {                      // both ends
+    rect(s * HL - (s > 0 ? 16.5 : 0), -20.16, 16.5, 40.32);  // penalty box
+    rect(s * HL - (s > 0 ? 5.5 : 0),  -9.16, 5.5, 18.32);    // six-yard box
+    dot(s * (HL - 11), 0, 0.22);                             // penalty spot
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.anisotropy = 8;
+  return tex;
+}
+const pitch = new THREE.Mesh(
+  new THREE.PlaneGeometry(PITCH_L + 12, PITCH_W + 12),
+  new THREE.MeshLambertMaterial({ map: makePitchTexture() })
+);
+pitch.rotation.x = -Math.PI / 2;
+pitch.receiveShadow = true;
+scene.add(pitch);
+
+// ---------------- Goals (posts, bar, simple net) ----------------
+function makeGoal(dirX) {                        // dirX: +1 goal at +x end
+  const grp = new THREE.Group();
+  const postMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 });
+  const postGeo = new THREE.CylinderGeometry(0.09, 0.09, GOAL_H, 10);
+  for (const s of [-1, 1]) {
+    const post = new THREE.Mesh(postGeo, postMat);
+    post.position.set(0, GOAL_H / 2, s * GOAL_W / 2);
+    post.castShadow = true;
+    grp.add(post);
+  }
+  const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, GOAL_W + 0.18, 10), postMat);
+  bar.rotation.x = Math.PI / 2;
+  bar.position.set(0, GOAL_H, 0);
+  grp.add(bar);
+  // Net: translucent box behind the line
+  const net = new THREE.Mesh(
+    new THREE.BoxGeometry(1.6, GOAL_H, GOAL_W),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.16, side: THREE.DoubleSide })
+  );
+  net.position.set(dirX * 0.85, GOAL_H / 2, 0);
+  grp.add(net);
+  grp.position.set(dirX * PITCH_L / 2, 0, 0);
+  return grp;
+}
+scene.add(makeGoal(1), makeGoal(-1));
+
+// ---------------- Players ----------------
+// Low-poly figure: legs, torso (kit colour), head. Group origin at feet.
+function makePlayerMesh(kitColor, isGK) {
+  const grp = new THREE.Group();
+  const kit  = new THREE.MeshStandardMaterial({ color: kitColor, roughness: 0.7 });
+  const skin = new THREE.MeshStandardMaterial({ color: 0xc68863, roughness: 0.8 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x1c1c22, roughness: 0.8 });
+
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.30, 0.55, 3, 10), kit);
+  torso.position.y = 1.12; torso.castShadow = true; grp.add(torso);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 12, 10), skin);
+  head.position.y = 1.82; head.castShadow = true; grp.add(head);
+
+  for (const s of [-1, 1]) {
+    const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.55, 3, 8), isGK ? kit : dark);
+    leg.position.set(0, 0.48, s * 0.16); leg.castShadow = true; grp.add(leg);
+    const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.08, 0.45, 3, 8), kit);
+    arm.position.set(0, 1.18, s * 0.42); arm.rotation.x = s * 0.25; grp.add(arm);
+  }
+  return grp;
+}
+
+// 4-4-2 formation for a team attacking +x (own goal at -x).
+// Positions are in that team's own frame; away team is mirrored.
+const FORMATION = [
+  { role: 'GK', x: -50, z: 0 },
+  { role: 'DF', x: -38, z: -24 }, { role: 'DF', x: -40, z: -8 },
+  { role: 'DF', x: -40, z: 8 },   { role: 'DF', x: -38, z: 24 },
+  { role: 'MF', x: -20, z: -26 }, { role: 'MF', x: -22, z: -9 },
+  { role: 'MF', x: -22, z: 9 },   { role: 'MF', x: -20, z: 26 },
+  { role: 'FW', x: -6,  z: -10 }, { role: 'FW', x: -6,  z: 10 },
+];
+
+const teams = [
+  { name: 'الهلال', color: 0x1457d9, gkColor: 0xf5c518, dir: 1,  score: 0, players: [] },
+  { name: 'المريخ', color: 0xd92323, gkColor: 0x22aa55, dir: -1, score: 0, players: [] },
+];
+
+for (const team of teams) {
+  for (const f of FORMATION) {
+    const isGK = f.role === 'GK';
+    const mesh = makePlayerMesh(isGK ? team.gkColor : team.color, isGK);
+    scene.add(mesh);
+    team.players.push({
+      team, role: f.role, mesh,
+      homeX: f.x * team.dir, homeZ: f.z,
+      x: f.x * team.dir, z: f.z,
+      tx: f.x * team.dir, tz: f.z,          // current movement target
+      speed: f.role === 'GK' ? 5.2 : f.role === 'FW' ? 7.4 : f.role === 'MF' ? 6.8 : 6.2,
+      bobPhase: Math.random() * Math.PI * 2,
+    });
+  }
+}
+const allPlayers = [...teams[0].players, ...teams[1].players];
+const goalkeeperOf = team => team.players[0];
+
+// ---------------- Ball ----------------
+const ballMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(BALL_R, 18, 14),
+  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35 })
+);
+ballMesh.castShadow = true;
+scene.add(ballMesh);
+
+const ball = {
+  x: 0, z: 0, y: BALL_R, vx: 0, vz: 0, vy: 0,
+  state: 'held',                 // held | pass | shot | loose
+  carrier: null,                 // player object when held
+  targetPlayer: null,            // pass receiver
+  targetGoalTeam: null,          // team that shot (for goal credit)
+};
+
+// ---------------- Match state ----------------
+const match = {
+  minute: 0, running: true, speed: 2, over: false,
+  phase: 'kickoff',              // kickoff | play | goal | fulltime
+  phaseTimer: 1.2,
+  kickoffTeam: teams[0],
+  camMode: 'broadcast',          // broadcast | behind
+};
+let decisionTimer = 1.2;         // carrier's think-time before pass/shoot
+
+// ---------------- DOM / HUD ----------------
+const elScore  = document.getElementById('score');
+const elClock  = document.getElementById('clock');
+const elBanner = document.getElementById('banner');
+const btnPlay  = document.getElementById('btnPlay');
+let bannerTimer = null;
+
+function showBanner(text, ms = 1600) {
+  elBanner.textContent = text;
+  elBanner.style.opacity = 1;
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => elBanner.style.opacity = 0, ms);
+}
+function updateHUD() {
+  elScore.textContent = `${teams[0].score} - ${teams[1].score}`;
+  const m = Math.min(90, Math.floor(match.minute));
+  const s = Math.floor((match.minute - m) * 60);
+  elClock.textContent = `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// ---------------- Helpers ----------------
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const dist2d = (ax, az, bx, bz) => Math.hypot(ax - bx, az - bz);
+const rand = (a, b) => a + Math.random() * (b - a);
+
+function resetPositions(kickoffTeam) {
+  for (const p of allPlayers) {
+    p.x = p.homeX; p.z = p.homeZ;
+    p.tx = p.homeX; p.tz = p.homeZ;
+  }
+  ball.x = 0; ball.z = 0; ball.y = BALL_R;
+  ball.vx = ball.vz = ball.vy = 0;
+  ball.state = 'held';
+  // Kickoff carrier: a forward of the team restarting play
+  const fw = kickoffTeam.players.filter(p => p.role === 'FW');
+  ball.carrier = fw[Math.floor(Math.random() * fw.length)];
+  ball.carrier.x = -kickoffTeam.dir * 1.2; ball.carrier.z = 0;
+  decisionTimer = 1.0;
+}
+
+// ---------------- AI: choose targets every frame ----------------
+function assignTargets() {
+  const carrier = ball.carrier;
+  const attackTeam = carrier ? carrier.team : null;
+
+  for (const p of allPlayers) {
+    if (p.role === 'GK') {
+      // Keeper: stays on his line, tracks the ball's z, rushes a loose ball nearby
+      const lineX = p.team.dir * -(PITCH_L / 2 - 1.2);
+      p.tx = lineX;
+      p.tz = clamp(ball.z * 0.55, -GOAL_W / 2, GOAL_W / 2);
+      if (ball.state === 'loose' && dist2d(p.x, p.z, ball.x, ball.z) < 7) { p.tx = ball.x; p.tz = ball.z; }
+      continue;
+    }
+    if (carrier && p === carrier) {
+      // Dribble toward the opponent goal, drifting to a shooting lane
+      p.tx = p.team.dir * (PITCH_L / 2);
+      p.tz = clamp(p.z * 0.92 + rand(-0.4, 0.4), -14, 14);
+      continue;
+    }
+    if (ball.state === 'loose' || ball.state === 'pass' || ball.state === 'shot') {
+      // Nearest 2 players of each team chase a free ball; receiver runs to meet a pass
+      if (ball.state === 'pass' && ball.targetPlayer === p) { p.tx = ball.x; p.tz = ball.z; continue; }
+      const mates = p.team.players.filter(q => q.role !== 'GK')
+        .sort((a, b) => dist2d(a.x, a.z, ball.x, ball.z) - dist2d(b.x, b.z, ball.x, ball.z));
+      if (mates[0] === p || mates[1] === p) { p.tx = ball.x; p.tz = ball.z; continue; }
+    }
+    // Default: hold formation, shifted toward the ball and the attack
+    const shiftX = ball.x * 0.28;
+    const shiftZ = ball.z * 0.18;
+    let push = 0;
+    if (attackTeam === p.team) push = p.team.dir * (p.role === 'FW' ? 7 : p.role === 'MF' ? 5 : 2);
+    p.tx = clamp(p.homeX + shiftX + push, -PITCH_L / 2 + 2, PITCH_L / 2 - 2);
+    p.tz = clamp(p.homeZ + shiftZ, -PITCH_W / 2 + 2, PITCH_W / 2 - 2);
+  }
+
+  // Nearest defender presses the carrier
+  if (carrier) {
+    const foes = carrier.team === teams[0] ? teams[1] : teams[0];
+    const presser = foes.players.filter(q => q.role !== 'GK')
+      .sort((a, b) => dist2d(a.x, a.z, carrier.x, carrier.z) - dist2d(b.x, b.z, carrier.x, carrier.z))[0];
+    if (presser) { presser.tx = carrier.x; presser.tz = carrier.z; }
+  }
+}
+
+function movePlayers(dt) {
+  for (const p of allPlayers) {
+    const d = dist2d(p.x, p.z, p.tx, p.tz);
+    if (d > 0.15) {
+      const step = Math.min(d, p.speed * dt);
+      p.x += (p.tx - p.x) / d * step;
+      p.z += (p.tz - p.z) / d * step;
+      p.mesh.rotation.y = Math.atan2(p.tx - p.x, p.tz - p.z);
+      p.bobPhase += dt * 11;                        // running bob
+    }
+    p.mesh.position.set(p.x, Math.abs(Math.sin(p.bobPhase)) * 0.07, p.z);
+  }
+}
+
+// ---------------- Carrier decisions: pass or shoot ----------------
+function carrierDecision() {
+  const c = ball.carrier;
+  if (!c) return;
+  const goalX = c.team.dir * PITCH_L / 2;
+  const dGoal = dist2d(c.x, c.z, goalX, 0);
+
+  // In range? Shoot (with a keeper-save chance handled on arrival)
+  if (dGoal < 26 && Math.random() < 0.65) {
+    const aimZ = rand(-GOAL_W / 2 + 0.5, GOAL_W / 2 - 0.5) * (Math.random() < 0.82 ? 1 : 1.7);
+    const flight = dGoal / 26;
+    ball.state = 'shot';
+    ball.targetGoalTeam = c.team;
+    ball.vx = (goalX - c.x) / flight;
+    ball.vz = (aimZ - c.z) / flight;
+    ball.vy = rand(2.5, 5.5);
+    ball.carrier = null;
+    decisionTimer = rand(0.9, 1.8);
+    return;
+  }
+  // Otherwise pass to a teammate (prefer forward options)
+  const mates = c.team.players.filter(p => p !== c && p.role !== 'GK');
+  mates.sort((a, b) =>
+    (Math.abs(b.x - goalX) + rand(0, 14)) - (Math.abs(a.x - goalX) + rand(0, 14)));
+  const receiver = mates[Math.floor(Math.random() * Math.min(3, mates.length))];
+  const flight = Math.max(0.35, dist2d(c.x, c.z, receiver.x, receiver.z) / 21);
+  ball.state = 'pass';
+  ball.targetPlayer = receiver;
+  ball.vx = (receiver.x - c.x) / flight;
+  ball.vz = (receiver.z - c.z) / flight;
+  ball.vy = 0;
+  ball.carrier = null;
+  decisionTimer = rand(0.9, 1.9);
+}
+
+// A defender reaching the carrier can win the ball
+function checkTackle() {
+  const c = ball.carrier;
+  if (!c) return;
+  const foes = c.team === teams[0] ? teams[1] : teams[0];
+  for (const f of foes.players) {
+    if (f.role !== 'GK' && dist2d(f.x, f.z, c.x, c.z) < 0.9 && Math.random() < 0.55) {
+      ball.carrier = f;
+      decisionTimer = rand(0.7, 1.4);
+      return;
+    }
+  }
+}
+
+// ---------------- Ball physics & events ----------------
+function onGoalScored(scoringTeam) {
+  scoringTeam.score++;
+  updateHUD();
+  showBanner(`⚽ هدف! ${scoringTeam.name}`, 2200);
+  match.phase = 'goal';
+  match.phaseTimer = 2.2;
+  match.kickoffTeam = scoringTeam === teams[0] ? teams[1] : teams[0];
+  ball.state = 'loose'; ball.vx = ball.vz = ball.vy = 0;
+}
+
+function updateBall(dt) {
+  if (ball.state === 'held' && ball.carrier) {
+    // Ball at the carrier's feet
+    const c = ball.carrier;
+    ball.x = c.x + c.team.dir * 0.75;
+    ball.z = c.z;
+    ball.y = BALL_R + Math.abs(Math.sin(performance.now() * 0.012)) * 0.06;
+    decisionTimer -= dt;
+    if (decisionTimer <= 0 && match.phase === 'play') carrierDecision();
+    checkTackle();
+    return;
+  }
+
+  // Free ball: integrate
+  ball.x += ball.vx * dt;
+  ball.z += ball.vz * dt;
+  if (ball.state === 'shot') {
+    ball.y += ball.vy * dt;
+    ball.vy -= 16 * dt;
+    if (ball.y < BALL_R) { ball.y = BALL_R; ball.vy *= -0.35; ball.vx *= 0.8; ball.vz *= 0.8; }
+  } else {
+    ball.y = BALL_R;
+    ball.vx *= (1 - 0.6 * dt); ball.vz *= (1 - 0.6 * dt);
+  }
+
+  // Pass arrival
+  if (ball.state === 'pass' && ball.targetPlayer) {
+    const r = ball.targetPlayer;
+    if (dist2d(ball.x, ball.z, r.x, r.z) < 1.1) {
+      ball.state = 'held'; ball.carrier = r; ball.targetPlayer = null;
+      ball.vx = ball.vz = 0;
+      decisionTimer = rand(0.7, 1.6);
+    }
+  }
+
+  // Shot resolution: keeper save or goal or miss
+  if (ball.state === 'shot') {
+    const dir = ball.targetGoalTeam.dir;                 // attacking direction
+    const defTeam = ball.targetGoalTeam === teams[0] ? teams[1] : teams[0];
+    const gk = goalkeeperOf(defTeam);
+    // Keeper save if the ball comes within his reach near the line
+    if (Math.sign(ball.x) === dir && Math.abs(Math.abs(ball.x) - PITCH_L / 2) < 2.2 &&
+        dist2d(ball.x, ball.z, gk.x, gk.z) < 1.9 && ball.y < GOAL_H + 0.4) {
+      ball.state = 'held'; ball.carrier = gk;
+      ball.vx = ball.vz = ball.vy = 0;
+      decisionTimer = 0.6;                               // keeper restarts play quickly
+      // Keeper distribution is just a pass: reuse decision with a manual pass
+      setTimeout(() => { if (ball.carrier === gk && match.phase === 'play') carrierDecision(); }, 500);
+    }
+  }
+
+  // Goal detection: crossed the line, inside the posts, under the bar
+  if (Math.abs(ball.x) > PITCH_L / 2 && Math.abs(ball.z) < GOAL_W / 2 && ball.y < GOAL_H) {
+    onGoalScored(ball.x > 0 ? teams[0] : teams[1]);
+    return;
+  }
+  // Out of bounds (missed shot / loose ball): give it to the nearest opponent of the last toucher area — simple restart via nearest keeper
+  if (Math.abs(ball.x) > PITCH_L / 2 + 3 || Math.abs(ball.z) > PITCH_W / 2 + 3) {
+    const defTeam = ball.x > 0 ? teams[1] : teams[0];
+    const gk = goalkeeperOf(defTeam);
+    ball.state = 'held'; ball.carrier = gk;
+    ball.x = gk.x; ball.z = gk.z;
+    decisionTimer = 0.5;
+    setTimeout(() => { if (ball.carrier === gk && match.phase === 'play') carrierDecision(); }, 400);
+  }
+  // Loose ball pickup
+  if (ball.state === 'loose' || ball.state === 'shot') {
+    for (const p of allPlayers) {
+      if (dist2d(ball.x, ball.z, p.x, p.z) < 0.95 && ball.y < 1.2) {
+        if (ball.state === 'shot' && p.team === ball.targetGoalTeam) continue;
+        ball.state = 'held'; ball.carrier = p;
+        ball.vx = ball.vz = ball.vy = 0;
+        decisionTimer = rand(0.7, 1.5);
+        break;
+      }
+    }
+  }
+  ballMesh.position.set(ball.x, ball.y, ball.z);
+  ballMesh.rotation.z -= ball.vx * dt * 2;
+  ballMesh.rotation.x += ball.vz * dt * 2;
+}
+
+// ---------------- Camera ----------------
+const camTargetPos = new THREE.Vector3(0, 30, 58);
+function updateCamera(dt) {
+  if (match.camMode === 'broadcast') {
+    // Side broadcast camera, gliding with the ball along x
+    camTargetPos.set(clamp(ball.x * 0.62, -30, 30), 27, 57);
+    camera.position.lerp(camTargetPos, 1 - Math.pow(0.0015, dt));
+    camera.lookAt(ball.x * 0.8, 0, ball.z * 0.35);
+  } else {
+    // Behind the goal the attacking team is shooting at
+    const dir = ball.carrier ? ball.carrier.team.dir
+      : (ball.targetGoalTeam ? ball.targetGoalTeam.dir : 1);
+    camTargetPos.set(dir * (PITCH_L / 2 + 13), 5.5, 0);
+    camera.position.lerp(camTargetPos, 1 - Math.pow(0.0015, dt));
+    camera.lookAt(ball.x, 1, ball.z);
+  }
+}
+
+// ---------------- Controls ----------------
+btnPlay.addEventListener('click', () => {
+  if (match.over) { restartMatch(); return; }
+  match.running = !match.running;
+  btnPlay.textContent = match.running ? '⏸ إيقاف مؤقت' : '▶ استئناف';
+});
+document.querySelectorAll('.spd').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.spd').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  match.speed = Number(b.dataset.s);
+}));
+document.getElementById('btnCam').addEventListener('click', e => {
+  match.camMode = match.camMode === 'broadcast' ? 'behind' : 'broadcast';
+  e.target.textContent = match.camMode === 'broadcast' ? '📷 كاميرا خلف المرمى' : '📷 كاميرا البث';
+});
+document.getElementById('btnRestart').addEventListener('click', restartMatch);
+
+function restartMatch() {
+  teams[0].score = 0; teams[1].score = 0;
+  match.minute = 0; match.over = false; match.running = true;
+  match.phase = 'kickoff'; match.phaseTimer = 1.2;
+  match.kickoffTeam = teams[0];
+  btnPlay.textContent = '⏸ إيقاف مؤقت';
+  resetPositions(teams[0]);
+  updateHUD();
+  showBanner('بداية المباراة', 1200);
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------------- Main loop ----------------
+resetPositions(teams[0]);
+updateHUD();
+document.getElementById('loading').style.display = 'none';
+showBanner('بداية المباراة', 1400);
+
+const clockT = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const rawDt = Math.min(clockT.getDelta(), 0.05);
+  const dt = match.running ? rawDt * match.speed : 0;
+
+  if (dt > 0 && !match.over) {
+    // Match clock
+    if (match.phase === 'play') {
+      match.minute += GAME_MIN_PER_SEC * dt;
+      if (match.minute >= 90) {
+        match.minute = 90; match.over = true; match.phase = 'fulltime';
+        showBanner(`نهاية المباراة: ${teams[0].name} ${teams[0].score} - ${teams[1].score} ${teams[1].name}`, 6000);
+        btnPlay.textContent = '↺ مباراة جديدة';
+      }
+      updateHUD();
+    }
+    // Phase transitions
+    if (match.phase === 'kickoff' || match.phase === 'goal') {
+      match.phaseTimer -= dt;
+      if (match.phaseTimer <= 0) {
+        if (match.phase === 'goal') resetPositions(match.kickoffTeam);
+        match.phase = 'play';
+      }
+    }
+    if (match.phase === 'play') {
+      assignTargets();
+      movePlayers(dt);
+      updateBall(dt);
+    } else {
+      // During kickoff/goal pauses players drift back to their spots
+      for (const p of allPlayers) { p.tx = p.homeX; p.tz = p.homeZ; }
+      movePlayers(dt);
+      ballMesh.position.set(ball.x, ball.y, ball.z);
+    }
+  }
+  updateCamera(rawDt);
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
